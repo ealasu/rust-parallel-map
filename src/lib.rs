@@ -3,12 +3,12 @@
 #[phase(plugin, link)] extern crate log;
 extern crate deque;
 
-use deque::{BufferPool, Worker, Data, Empty, Abort};
+use std::thread::Thread;
+use deque::{BufferPool, Data, Empty, Abort};
 
 
 #[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
 pub struct ParallelMap<A, B> {
-    worker: Worker<A>,
     rx: Receiver<B>,
     sent: uint,
     received: uint
@@ -38,8 +38,8 @@ impl<A: Send, I> IteratorParallelMapExt<A> for I where I: Iterator<A> {}
 
 pub trait IteratorParallelMapExt<A: Send> : Iterator<A> {
     fn parallel_map<B:Send>(self, f: fn(A) -> B, concurrency: uint) -> ParallelMap<A, B> {
-        let mut pool = BufferPool::new();
-        let (mut worker, mut stealer) = pool.deque();
+        let pool = BufferPool::new();
+        let (worker, stealer) = pool.deque();
         let (tx, rx) = channel();
 
         let mut sent = 0u;
@@ -53,7 +53,7 @@ pub trait IteratorParallelMapExt<A: Send> : Iterator<A> {
             let tx = tx.clone();
             let stealer = stealer.clone();
             let f = f.clone();
-            spawn(move || {
+            Thread::spawn(move || {
                 'outer: loop {
                     let v: A;
                     'inner: loop {
@@ -66,11 +66,10 @@ pub trait IteratorParallelMapExt<A: Send> : Iterator<A> {
                     let res = f(v);
                     tx.send(res);
                 }
-            });
+            }).detach();
         }
 
         ParallelMap {
-            worker: worker,
             rx: rx,
             sent: sent,
             received: 0
