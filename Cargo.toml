@@ -1,0 +1,9 @@
+[package]
+name = "parallel_map"
+version = "0.0.1"
+authors = ["eman"]
+
+[dependencies]
+log = "*"
+deque = "*"
+
