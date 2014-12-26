@@ -4,72 +4,111 @@
 extern crate deque;
 
 use std::thread::Thread;
-use deque::{BufferPool, Data, Empty, Abort};
+use std::sync::{Arc, Mutex, Condvar};
+use deque::{BufferPool, Worker, Data, Empty, Abort};
 
 
 #[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
-pub struct ParallelMap<A, B> {
+pub struct ParallelMap<A, B, I> {
+    inner: I,
+    eof_pair: Arc<(Mutex<bool>, Condvar)>,
+    worker: Worker<A>,
     rx: Receiver<B>,
     sent: uint,
     received: uint
 }
 
-
-impl<'a, A, B: Send> Iterator<B> for ParallelMap<A, B> {
+impl<'a, A: Send, B: Send, I: Iterator<A>> Iterator<B> for ParallelMap<A, B, I> {
 
     fn next(&mut self) -> Option<B> {
-        if self.received >= self.sent {
+        if self.received == self.sent {
             return None;
         }
+        let &(ref eof_mutex, ref eof_cvar) = &*self.eof_pair;
+        if let Some(v) = self.inner.next() {
+            self.worker.push(v);
+            self.sent += 1;
+        } else {
+            let mut eof = eof_mutex.lock();
+            *eof = true;
+        }
+        eof_cvar.notify_all();
         let res = self.rx.recv();
         self.received += 1;
         Some(res)
     }
 
     fn size_hint(&self) -> (uint, Option<uint>) {
-        let items_left = self.sent - self.received;
-        (items_left, Some(items_left))
+        let (lower, upper) = self.inner.size_hint();
+        let sent_but_not_recvd = self.sent - self.received;
+        if let Some(upper) = upper {
+            (lower + sent_but_not_recvd, Some(upper + sent_but_not_recvd))
+        } else {
+            (sent_but_not_recvd, None)
+        }
     }
 
 }
 
-
 impl<A: Send, I> IteratorParallelMapExt<A> for I where I: Iterator<A> {}
 
 pub trait IteratorParallelMapExt<A: Send> : Iterator<A> {
-    fn parallel_map<B:Send>(self, f: fn(A) -> B, concurrency: uint) -> ParallelMap<A, B> {
+    fn parallel_map<B,F>(mut self, f: F, concurrency: uint) -> ParallelMap<A, B, Self>
+        where B: Send, F: Send, F: Sync, F: Fn(A) -> B {
+
+        let f = Arc::new(f);
         let pool = BufferPool::new();
         let (worker, stealer) = pool.deque();
         let (tx, rx) = channel();
+        let eof_pair = Arc::new((Mutex::new(false), Condvar::new()));
 
+        // prefill
         let mut sent = 0u;
-        let mut iter = self;
-        for v in iter {
+        for v in self.by_ref().take(concurrency * 2) {
             worker.push(v);
             sent += 1;
         }
 
-        for _ in range(0, concurrency) {
+        for thread_id in range(0, concurrency) {
             let tx = tx.clone();
             let stealer = stealer.clone();
+            let eof_pair = eof_pair.clone();
             let f = f.clone();
             Thread::spawn(move || {
                 'outer: loop {
                     let v: A;
                     'inner: loop {
                         match stealer.steal() {
-                            Data(d) => { v = d; break },
-                            Empty => break 'outer,
-                            Abort => continue
+                            Data(d) => {
+                                debug!("{} got data", thread_id);
+                                v = d;
+                                break;
+                            }
+                            Empty => {
+                                let &(ref eof_mutex, ref eof_cvar) = &*eof_pair;
+                                let eof = eof_mutex.lock();
+                                if *eof {
+                                    break 'outer;
+                                } else {
+                                    debug!("{} waiting for cvar", thread_id);
+                                    eof_cvar.wait(&eof);
+                                }
+                            }
+                            Abort => {
+                                continue;
+                            }
                         }
                     }
-                    let res = f(v);
+                    let res = (*f)(v);
                     tx.send(res);
                 }
             }).detach();
         }
 
         ParallelMap {
+            inner: self,
+            eof_pair: eof_pair,
+            worker: worker,
             rx: rx,
             sent: sent,
             received: 0
@@ -84,17 +123,11 @@ mod tests {
 
     use std::collections::BTreeSet;
     use std::sync::{Mutex, Arc};
-    use std::io::timer::sleep;
-    use std::time::duration::Duration;
     use std::thread::Thread;
-    use deque::{BufferPool, Data, Empty, Abort};
     use super::IteratorParallelMapExt;
 
     static ITEMS: int = 100;
     static WORKERS: uint = 5;
-
-    #[test]
-    fn test_empty() {}
 
     #[test]
     fn test_threads() {
@@ -111,10 +144,7 @@ mod tests {
             }).detach();
         }
 
-        for res in rx.iter().take(stuff.len()) {
-            //println!("gathered {}", res);
-        }
-        //println!("done");
+        rx.iter().take(stuff.len()).count();
     }
 
     #[bench]
@@ -123,14 +153,14 @@ mod tests {
     }
 
     #[test]
-    fn test_mutex_channel() {
+    fn test_mutex_iter() {
         let stuff: Vec<int> = range(0, ITEMS).collect();
         let len = stuff.len();
         let iter = Arc::new(Mutex::new(stuff.into_iter()));
 
         let (tx, rx) = channel();
 
-        for worker_id in range(0, WORKERS) {
+        for _ in range(0, WORKERS) {
             let tx = tx.clone();
             let iter = iter.clone();
             Thread::spawn(move || {
@@ -149,36 +179,37 @@ mod tests {
             }).detach();
         }
 
-        for _ in rx.iter().take(len) {
-            //debug!("res: {}", res);
-        }
+        rx.iter().take(len).count();
     }
 
     #[bench]
-    fn bench_mutex_channel(b: &mut test::Bencher) {
-        b.iter(test_mutex_channel);
+    fn bench_mutex_iter(b: &mut test::Bencher) {
+        b.iter(test_mutex_iter);
     }
 
     #[test]
     fn test_deque() {
         let stuff: Vec<int> = range(0, 1000).collect();
-        let res: BTreeSet<int> = run_deque(stuff.clone()).iter().map(|it| *it).collect();
+        let res: BTreeSet<int> = stuff.clone().into_iter().parallel_map(|x| x * 2, 6).collect();
         let expected: BTreeSet<int> = stuff.iter().map(|it| *it * 2).collect();
         assert_eq!(res, expected);
     }
 
-    fn run_deque(stuff: Vec<int>) -> Vec<int> {
-        fn times_two(x: int) -> int {
-            x * 2
-        }
-        stuff.clone().into_iter().parallel_map(times_two, WORKERS).collect()
+    #[bench]
+    fn bench_deque_minimal_overhead(b: &mut test::Bencher) {
+        b.iter(|| {
+            range(0i, ITEMS).parallel_map(|x| x * 2, WORKERS).count();
+        });
     }
 
     #[bench]
-    fn bench_deque(b: &mut test::Bencher) {
-        let stuff: Vec<int> = range(0, ITEMS).collect();
+    fn bench_deque_much_memory(b: &mut test::Bencher) {
+        let buf = Vec::from_elem(1024*1024, 0u8);
         b.iter(|| {
-            run_deque(stuff.clone());    
+            range(0i, ITEMS)
+                .map(|_| buf.clone())
+                .parallel_map(|_| 2u, WORKERS)
+                .count();
         });
     }
 }
