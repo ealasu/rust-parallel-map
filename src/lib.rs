@@ -53,8 +53,14 @@ impl<'a, A: Send, B: Send, I: Iterator<A>> Iterator<B> for ParallelMap<A, B, I> 
 impl<A: Send, I> IteratorParallelMapExt<A> for I where I: Iterator<A> {}
 
 pub trait IteratorParallelMapExt<A: Send> : Iterator<A> {
-    fn parallel_map<B,F>(mut self, f: F, concurrency: uint) -> ParallelMap<A, B, Self>
-        where B: Send, F: Send, F: Sync, F: Fn(A) -> B {
+
+    fn parallel_map<B,F>(self, f: F, concurrency: uint) -> ParallelMap<A, B, Self>
+        where B: Send, F: Send+Sync, F: Fn(A) -> B {
+        self.parallel_map_ctx(move |_, v| f(v), concurrency, ())
+    }
+
+    fn parallel_map_ctx<B,F,C>(mut self, f: F, concurrency: uint, ctx: C) -> ParallelMap<A, B, Self>
+        where B: Send, F: Send+Sync, F: Fn(&mut C, A) -> B, C: Clone+Send {
 
         let f = Arc::new(f);
         let pool = BufferPool::new();
@@ -74,6 +80,7 @@ pub trait IteratorParallelMapExt<A: Send> : Iterator<A> {
             let stealer = stealer.clone();
             let eof_pair = eof_pair.clone();
             let f = f.clone();
+            let mut ctx = ctx.clone();
             Thread::spawn(move || {
                 'outer: loop {
                     let v: A;
@@ -99,7 +106,7 @@ pub trait IteratorParallelMapExt<A: Send> : Iterator<A> {
                             }
                         }
                     }
-                    let res = (*f)(v);
+                    let res = (*f)(&mut ctx, v);
                     tx.send(res);
                 }
             }).detach();
