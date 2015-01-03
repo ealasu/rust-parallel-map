@@ -29,7 +29,7 @@ impl<'a, A: Send, B: Send, I: Iterator<A>> Iterator<B> for ParallelMap<A, B, I> 
             self.worker.push(v);
             self.sent += 1;
         } else {
-            let mut eof = eof_mutex.lock();
+            let mut eof = eof_mutex.lock().unwrap();
             *eof = true;
         }
         eof_cvar.notify_all();
@@ -93,12 +93,14 @@ pub trait IteratorParallelMapExt<A: Send> : Iterator<A> {
                             }
                             Empty => {
                                 let &(ref eof_mutex, ref eof_cvar) = &*eof_pair;
-                                let eof = eof_mutex.lock();
+                                let eof = eof_mutex.lock().unwrap();
                                 if *eof {
                                     break 'outer;
                                 } else {
                                     debug!("{} waiting for cvar", thread_id);
-                                    eof_cvar.wait(&eof);
+                                    if *eof_cvar.wait(eof).unwrap() {
+                                        break 'outer;
+                                    }
                                 }
                             }
                             Abort => {
@@ -172,7 +174,7 @@ mod tests {
             let iter = iter.clone();
             Thread::spawn(move || {
                 loop {
-                    let mut iter = iter.lock();
+                    let mut iter = iter.lock().unwrap();
                     match (*iter).next() {
                         Some(v) => {
                             //debug!("worker {} got {}", worker_id, v);
