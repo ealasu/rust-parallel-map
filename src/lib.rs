@@ -1,4 +1,4 @@
-#![feature(phase)]
+#![feature(phase, associated_types)]
 
 #[phase(plugin, link)] extern crate log;
 extern crate deque;
@@ -19,7 +19,8 @@ pub struct ParallelMap<A, B, I> {
     received: uint
 }
 
-impl<'a, A: Send, B: Send, I: Iterator<A>> Iterator<B> for ParallelMap<A, B, I> {
+impl<'a, A: Send, B: Send, I: Iterator<Item=A>> Iterator for ParallelMap<A, B, I> {
+    type Item = B;
 
     fn next(&mut self) -> Option<B> {
         if self.received == self.sent {
@@ -51,9 +52,17 @@ impl<'a, A: Send, B: Send, I: Iterator<A>> Iterator<B> for ParallelMap<A, B, I> 
 
 }
 
-impl<A: Send, I> IteratorParallelMapExt<A> for I where I: Iterator<A> {}
+pub trait IteratorParallelMapExt<A> : Iterator {
 
-pub trait IteratorParallelMapExt<A: Send> : Iterator<A> + Sized {
+    fn parallel_map<B,F>(self, f: F, concurrency: uint) -> ParallelMap<A, B, Self>
+        where B: Send, F: Send+Sync, F: Fn(A) -> B;
+
+    fn parallel_map_ctx<B,F,C>(mut self, f: F, concurrency: uint, ctx: C) -> ParallelMap<A, B, Self>
+        where B: Send, F: Send+Sync, F: Fn(&mut C, A) -> B, C: Clone+Send;
+
+}
+
+impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
 
     fn parallel_map<B,F>(self, f: F, concurrency: uint) -> ParallelMap<A, B, Self>
         where B: Send, F: Send+Sync, F: Fn(A) -> B {
@@ -132,7 +141,9 @@ mod tests {
     extern crate test;
 
     use std::collections::BTreeSet;
-    use std::sync::{Mutex, Arc};
+    use std::iter::repeat;
+    //use std::sync::{Mutex, Arc};
+    use std::sync::mpsc::channel;
     use std::thread::Thread;
     use super::IteratorParallelMapExt;
 
@@ -150,7 +161,7 @@ mod tests {
             let val = val.clone();
             Thread::spawn(move || {
                 let res = val * 2;
-                tx.send(res);
+                tx.send(res).unwrap();
             }).detach();
         }
 
@@ -162,40 +173,40 @@ mod tests {
         b.iter(test_threads);
     }
 
-    #[test]
-    fn test_mutex_iter() {
-        let stuff: Vec<int> = range(0, ITEMS).collect();
-        let len = stuff.len();
-        let iter = Arc::new(Mutex::new(stuff.into_iter()));
+    //#[test]
+    //fn test_mutex_iter() {
+    //    let stuff: Vec<int> = range(0, ITEMS).collect();
+    //    let len = stuff.len();
+    //    let iter = Arc::new(Mutex::new(stuff.into_iter()));
 
-        let (tx, rx) = channel();
+    //    let (tx, rx) = channel();
 
-        for _ in range(0, WORKERS) {
-            let tx = tx.clone();
-            let iter = iter.clone();
-            Thread::spawn(move || {
-                loop {
-                    let mut iter = iter.lock().unwrap();
-                    match (*iter).next() {
-                        Some(v) => {
-                            //debug!("worker {} got {}", worker_id, v);
-                            let res = v * 2;
-                            tx.send(res);
-                        }
-                        None => break
-                    }
-                }
-                //debug!("worker {} is done", worker_id);
-            }).detach();
-        }
+    //    for _ in range(0, WORKERS) {
+    //        let tx = tx.clone();
+    //        let iter = iter.clone();
+    //        Thread::spawn(move || {
+    //            loop {
+    //                let mut iter = iter.lock().unwrap();
+    //                match (*iter).next() {
+    //                    Some(v) => {
+    //                        //debug!("worker {} got {}", worker_id, v);
+    //                        let res = v * 2;
+    //                        tx.send(res);
+    //                    }
+    //                    None => break
+    //                }
+    //            }
+    //            //debug!("worker {} is done", worker_id);
+    //        }).detach();
+    //    }
 
-        rx.iter().take(len).count();
-    }
+    //    rx.iter().take(len).count();
+    //}
 
-    #[bench]
-    fn bench_mutex_iter(b: &mut test::Bencher) {
-        b.iter(test_mutex_iter);
-    }
+    //#[bench]
+    //fn bench_mutex_iter(b: &mut test::Bencher) {
+    //    b.iter(test_mutex_iter);
+    //}
 
     #[test]
     fn test_deque() {
@@ -214,7 +225,7 @@ mod tests {
 
     #[bench]
     fn bench_deque_much_memory(b: &mut test::Bencher) {
-        let buf = Vec::from_elem(1024*1024, 0u8);
+        let buf = repeat(0).take(1024 * 1024).collect::<Vec<u8>>();
         b.iter(|| {
             range(0i, ITEMS)
                 .map(|_| buf.clone())
