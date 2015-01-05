@@ -3,6 +3,7 @@
 #[phase(plugin, link)] extern crate log;
 extern crate deque;
 
+use std::iter::Fuse;
 use std::thread::Thread;
 use std::sync::{Arc, Mutex, Condvar};
 use std::sync::mpsc::{channel, Receiver};
@@ -11,7 +12,7 @@ use deque::{BufferPool, Worker, Data, Empty, Abort};
 
 #[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
 pub struct ParallelMap<A, B, I> {
-    inner: I,
+    inner: Fuse<I>,
     eof_pair: Arc<(Mutex<bool>, Condvar)>,
     worker: Worker<A>,
     rx: Receiver<B>,
@@ -23,16 +24,18 @@ impl<'a, A: Send, B: Send, I: Iterator<Item=A>> Iterator for ParallelMap<A, B, I
     type Item = B;
 
     fn next(&mut self) -> Option<B> {
-        if self.received == self.sent {
-            return None;
-        }
         let &(ref eof_mutex, ref eof_cvar) = &*self.eof_pair;
         if let Some(v) = self.inner.next() {
             self.worker.push(v);
             self.sent += 1;
         } else {
-            let mut eof = eof_mutex.lock().unwrap();
-            *eof = true;
+            {
+                let mut eof = eof_mutex.lock().unwrap();
+                *eof = true;
+            }
+            if self.received == self.sent {
+                return None;
+            }
         }
         eof_cvar.notify_all();
         let res = self.rx.recv().unwrap();
@@ -69,9 +72,10 @@ impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
         self.parallel_map_ctx(move |_, v| f(v), concurrency, ())
     }
 
-    fn parallel_map_ctx<B,F,C>(mut self, f: F, concurrency: uint, ctx: C) -> ParallelMap<A, B, Self>
+    fn parallel_map_ctx<B,F,C>(self, f: F, concurrency: uint, ctx: C) -> ParallelMap<A, B, Self>
         where B: Send, F: Send+Sync, F: Fn(&mut C, A) -> B, C: Clone+Send {
 
+        let mut fused = self.fuse();
         let f = Arc::new(f);
         let pool = BufferPool::new();
         let (worker, stealer) = pool.deque();
@@ -80,7 +84,7 @@ impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
 
         // prefill
         let mut sent = 0u;
-        for v in self.by_ref().take(concurrency * 2) {
+        for v in fused.by_ref().take(concurrency * 2) {
             worker.push(v);
             sent += 1;
         }
@@ -125,7 +129,7 @@ impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
         }
 
         ParallelMap {
-            inner: self,
+            inner: fused,
             eof_pair: eof_pair,
             worker: worker,
             rx: rx,
