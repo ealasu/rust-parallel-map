@@ -55,17 +55,7 @@ impl<'a, A: Send, B: Send, I: Iterator<Item=A>> Iterator for ParallelMap<A, B, I
 
 }
 
-pub trait IteratorParallelMapExt<A> : Iterator {
-
-    fn parallel_map<B,F>(self, f: F, concurrency: uint) -> ParallelMap<A, B, Self>
-        where B: Send, F: Send+Sync, F: Fn(A) -> B;
-
-    fn parallel_map_ctx<B,F,C>(mut self, f: F, concurrency: uint, ctx: C) -> ParallelMap<A, B, Self>
-        where B: Send, F: Send+Sync, F: Fn(&mut C, A) -> B, C: Clone+Send;
-
-}
-
-impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
+pub trait IteratorParallelMapExt<A: Send> : Iterator<Item=A> + Sized {
 
     fn parallel_map<B,F>(self, f: F, concurrency: uint) -> ParallelMap<A, B, Self>
         where B: Send, F: Send+Sync, F: Fn(A) -> B {
@@ -101,7 +91,7 @@ impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
                     'inner: loop {
                         match stealer.steal() {
                             Data(d) => {
-                                //debug!("{} got data", thread_id);
+                                if cfg!(test) { debug!("thread {} got data", thread_id); }
                                 v = d;
                                 break;
                             }
@@ -111,14 +101,11 @@ impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
                                 if *eof {
                                     break 'outer;
                                 } else {
-                                    debug!("{} waiting for cvar", thread_id);
+                                    if cfg!(test) { debug!("thread {} waiting for cvar", thread_id); }
                                     let _ = eof_cvar.wait(eof).unwrap();
-                                    continue;
                                 }
                             }
-                            Abort => {
-                                continue;
-                            }
+                            Abort => {}
                         }
                     }
                     let res = (*f)(&mut ctx, v);
@@ -138,6 +125,8 @@ impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
     }
 }
 
+impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {}
+
 
 #[cfg(test)]
 mod tests {
@@ -148,6 +137,8 @@ mod tests {
     //use std::sync::{Mutex, Arc};
     use std::sync::mpsc::channel;
     use std::thread::Thread;
+    use std::io::timer::sleep;
+    use std::time::duration::Duration;
     use super::IteratorParallelMapExt;
 
     static ITEMS: int = 100;
@@ -212,10 +203,18 @@ mod tests {
     //}
 
     #[test]
-    fn test_deque() {
-        let stuff: Vec<int> = range(0, 1000).collect();
-        let res: BTreeSet<int> = stuff.clone().into_iter().parallel_map(|x| x * 2, 6).collect();
-        let expected: BTreeSet<int> = stuff.iter().map(|it| *it * 2).collect();
+    fn test_deque_fast_op() {
+        let res: BTreeSet<int> = range(0, 1000).parallel_map(|x| { x }, WORKERS).collect();
+        let expected: BTreeSet<int> = range(0, 1000).collect();
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn test_deque_slow_op() {
+        let res: BTreeSet<int> = range(0, 1000)
+            .parallel_map(|x| { sleep(Duration::milliseconds(1));  x }, WORKERS)
+            .collect();
+        let expected: BTreeSet<int> = range(0, 1000).collect();
         assert_eq!(res, expected);
     }
 
