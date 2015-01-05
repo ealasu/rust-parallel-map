@@ -101,7 +101,7 @@ impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
                     'inner: loop {
                         match stealer.steal() {
                             Data(d) => {
-                                debug!("{} got data", thread_id);
+                                //debug!("{} got data", thread_id);
                                 v = d;
                                 break;
                             }
@@ -112,9 +112,8 @@ impl<A, I> IteratorParallelMapExt<A> for I where I: Iterator<Item=A>, A: Send {
                                     break 'outer;
                                 } else {
                                     debug!("{} waiting for cvar", thread_id);
-                                    if *eof_cvar.wait(eof).unwrap() {
-                                        break 'outer;
-                                    }
+                                    let _ = eof_cvar.wait(eof).unwrap();
+                                    continue;
                                 }
                             }
                             Abort => {
