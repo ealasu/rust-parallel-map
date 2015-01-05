@@ -2,7 +2,7 @@ language: rust
 sudo: false
 script:
   - cargo build --verbose
-  - cargo test --verbose
-  - cargo bench --verbose
+  - RUST_BACKTRACE=1 cargo test --verbose
+  - RUST_BACKTRACE=1 cargo bench --verbose
   - cargo doc
 
