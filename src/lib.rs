@@ -1,6 +1,4 @@
-#![feature(phase, associated_types)]
-
-#[phase(plugin, link)] extern crate log;
+#[macro_use] extern crate log;
 extern crate deque;
 
 use std::iter::Fuse;
@@ -16,8 +14,8 @@ pub struct ParallelMap<A, B, I> {
     eof_pair: Arc<(Mutex<bool>, Condvar)>,
     worker: Worker<A>,
     rx: Receiver<B>,
-    sent: uint,
-    received: uint
+    sent: usize,
+    received: usize,
 }
 
 impl<'a, A: Send, B: Send, I: Iterator<Item=A>> Iterator for ParallelMap<A, B, I> {
@@ -43,7 +41,7 @@ impl<'a, A: Send, B: Send, I: Iterator<Item=A>> Iterator for ParallelMap<A, B, I
         Some(res)
     }
 
-    fn size_hint(&self) -> (uint, Option<uint>) {
+    fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower, upper) = self.inner.size_hint();
         let sent_but_not_recvd = self.sent - self.received;
         if let Some(upper) = upper {
@@ -57,12 +55,12 @@ impl<'a, A: Send, B: Send, I: Iterator<Item=A>> Iterator for ParallelMap<A, B, I
 
 pub trait IteratorParallelMapExt<A: Send> : Iterator<Item=A> + Sized {
 
-    fn parallel_map<B,F>(self, f: F, concurrency: uint) -> ParallelMap<A, B, Self>
+    fn parallel_map<B,F>(self, f: F, concurrency: usize) -> ParallelMap<A, B, Self>
         where B: Send, F: Send+Sync, F: Fn(A) -> B {
         self.parallel_map_ctx(move |_, v| f(v), concurrency, ())
     }
 
-    fn parallel_map_ctx<B,F,C>(self, f: F, concurrency: uint, ctx: C) -> ParallelMap<A, B, Self>
+    fn parallel_map_ctx<B,F,C>(self, f: F, concurrency: usize, ctx: C) -> ParallelMap<A, B, Self>
         where B: Send, F: Send+Sync, F: Fn(&mut C, A) -> B, C: Clone+Send {
 
         let mut fused = self.fuse();
@@ -73,7 +71,7 @@ pub trait IteratorParallelMapExt<A: Send> : Iterator<Item=A> + Sized {
         let eof_pair = Arc::new((Mutex::new(false), Condvar::new()));
 
         // prefill
-        let mut sent = 0u;
+        let mut sent = 0;
         for v in fused.by_ref().take(concurrency * 2) {
             worker.push(v);
             sent += 1;
@@ -111,7 +109,7 @@ pub trait IteratorParallelMapExt<A: Send> : Iterator<Item=A> + Sized {
                     let res = (*f)(&mut ctx, v);
                     tx.send(res).unwrap();
                 }
-            }).detach();
+            });
         }
 
         ParallelMap {
@@ -141,8 +139,8 @@ mod tests {
     use std::time::duration::Duration;
     use super::IteratorParallelMapExt;
 
-    static ITEMS: int = 100;
-    static WORKERS: uint = 5;
+    static ITEMS: isize = 100;
+    static WORKERS: usize = 5;
 
     #[test]
     fn test_threads() {
@@ -156,7 +154,7 @@ mod tests {
             Thread::spawn(move || {
                 let res = val * 2;
                 tx.send(res).unwrap();
-            }).detach();
+            });
         }
 
         rx.iter().take(stuff.len()).count();
@@ -191,7 +189,7 @@ mod tests {
     //                }
     //            }
     //            //debug!("worker {} is done", worker_id);
-    //        }).detach();
+    //        });
     //    }
 
     //    rx.iter().take(len).count();
